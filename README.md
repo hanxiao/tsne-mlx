@@ -1,75 +1,64 @@
 # tsne-mlx
 
-Pure MLX t-SNE implementation for Apple Silicon. Runs the exact t-SNE algorithm entirely on Metal GPU via MLX.
+t-SNE implementation in pure MLX for Apple Silicon. No PyTorch, no CUDA -- runs on Metal GPU.
+
+Exact algorithm (not Barnes-Hut). Best suited for datasets up to ~2K-3K points where it outperforms sklearn by 2-3x. For larger datasets, sklearn's Barnes-Hut approximation is faster.
 
 ## Install
 
 ```bash
-pip install tsne-mlx
-```
-
-Or from source:
-
-```bash
-git clone https://github.com/hanxiao/tsne-mlx.git
-cd tsne-mlx
-pip install -e .
+git clone https://github.com/hanxiao/tsne-mlx.git && cd tsne-mlx
+uv venv .venv && source .venv/bin/activate
+uv pip install -e .
 ```
 
 ## Usage
-
-API mirrors scikit-learn:
 
 ```python
 from tsne_mlx import TSNE
 import numpy as np
 
-X = np.random.randn(1000, 50).astype(np.float32)
-Y = TSNE(n_components=2, perplexity=30, random_state=42).fit_transform(X)
+X = np.random.randn(1000, 128).astype(np.float32)
+Y = TSNE(n_components=2, perplexity=30, n_iter=1000).fit_transform(X)
 ```
 
 Parameters:
 
-- `n_components`: output dimensions (default: 2)
-- `perplexity`: effective number of neighbors (default: 30)
-- `learning_rate`: gradient descent step size (default: 200)
-- `n_iter`: number of optimization iterations (default: 1000)
-- `early_exaggeration`: factor for early phase (default: 12)
+- `n_components`: output dimensions (default 2)
+- `perplexity`: effective number of neighbors (default 30)
+- `learning_rate`: SGD learning rate (default 200)
+- `n_iter`: optimization iterations (default 1000)
+- `early_exaggeration`: P scaling factor for early iterations (default 12)
 - `random_state`: seed for reproducibility
-- `verbose`: set to 1 for progress logging
+- `verbose`: print KL divergence every N iterations (0 = silent)
 
-## Benchmark
+## Benchmark (M3 Ultra)
 
-Tested on M3 Ultra (512GB), 1000 iterations, MNIST digits:
+```
+N       sklearn    MLX      speedup
+1000    1.65s      0.49s    3.4x
+2000    2.32s      0.99s    2.3x
+5000    3.50s      4.74s    0.7x
+```
 
-| Samples | MLX (s) | sklearn (s) |
-|---------|---------|-------------|
-| 1,000   | 0.68    | 0.42        |
-| 5,000   | 8.87    | 5.60        |
-| 10,000  | 34.59   | 8.89        |
-
-sklearn uses Barnes-Hut approximation (O(n log n) per iteration) by default. This implementation uses the exact algorithm (O(n^2) per iteration), which is more accurate but scales quadratically. The gap widens with dataset size as expected.
-
-For datasets under ~3K points, performance is comparable. The exact method produces tighter, more well-separated clusters.
+MLX wins at N < ~3K due to GPU-parallel pairwise distance and gradient computation. sklearn's Barnes-Hut (O(n log n)) scales better beyond that.
 
 ## Comparison
 
-Side-by-side with sklearn on 5K MNIST digits:
+sklearn digits dataset (1797 samples, 64 dims, 10 classes):
 
 ![comparison](comparison.png)
 
-Both produce well-separated digit clusters. The MLX exact method tends to produce tighter, more compact clusters compared to sklearn's Barnes-Hut approximation.
+Both produce well-separated clusters. Layout differs due to random initialization (expected for t-SNE).
 
-## Implementation
+## How it works
 
-- Pairwise distance computation on Metal GPU
-- Vectorized binary search for perplexity-based Gaussian widths
-- Symmetrized joint probabilities
-- Gradient descent with adaptive gains, momentum scheduling, and early exaggeration
-- Student t-distribution (df=1) for low-dimensional affinities
-
-Dependencies: `mlx`, `numpy`. No PyTorch, no CUDA.
+1. Pairwise distances computed on Metal GPU via `||x||^2 + ||y||^2 - 2x.y`
+2. Binary search for per-point sigma to achieve target perplexity
+3. Symmetrize and normalize joint probabilities
+4. Gradient descent with momentum, adaptive gains, early exaggeration
+5. Gradient computed without materializing O(n^2 * d) tensor: uses `row_sums * Y - weights @ Y`
 
 ## License
 
-Apache 2.0
+MIT

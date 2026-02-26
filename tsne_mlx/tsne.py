@@ -1,243 +1,237 @@
-"""t-SNE implementation in pure MLX."""
+"""t-SNE implementation in pure MLX for Apple Silicon."""
 
 import mlx.core as mx
 import numpy as np
 
 
-def _pairwise_distances(X):
-    """Compute pairwise squared Euclidean distances on GPU."""
-    sum_X = mx.sum(X * X, axis=1)
-    D = sum_X[:, None] + sum_X[None, :] - 2.0 * (X @ X.T)
-    return mx.maximum(D, 0.0)
-
-
-def _binary_search_perplexity_vectorized(D_np, target_perplexity, tol=1e-5, max_iter=100):
-    """Vectorized binary search for perplexity across all points simultaneously.
-    
-    Operates in numpy for the binary search (one-time cost), returns MLX array.
-    D_np: numpy array of pairwise distances (n, n).
-    """
-    n = D_np.shape[0]
-    target_entropy = np.log(target_perplexity)
-
-    # Initialize
-    beta = np.ones(n)        # precision = 1/(2*sigma^2)
-    beta_min = np.full(n, -np.inf)
-    beta_max = np.full(n, np.inf)
-
-    # Zero out diagonal
-    np.fill_diagonal(D_np, np.inf)
-
-    P = np.zeros((n, n))
-
-    for _ in range(max_iter):
-        # Compute P_j|i for all i simultaneously: (n, n)
-        # P_j|i = exp(-beta_i * D_ij) / sum_j exp(-beta_i * D_ij)
-        exponents = -D_np * beta[:, None]
-        # Numerical stability: subtract max per row
-        exponents -= exponents.max(axis=1, keepdims=True)
-        Pi = np.exp(exponents)
-        np.fill_diagonal(Pi, 0.0)
-        sum_Pi = Pi.sum(axis=1)
-        sum_Pi = np.maximum(sum_Pi, 1e-12)
-
-        Pi_norm = Pi / sum_Pi[:, None]
-
-        # Entropy: H_i = log(sum_Pi) + beta_i * sum_j(D_ij * P_j|i_unnorm) / sum_Pi
-        # Simplified: H_i = -sum_j P_j|i * log(P_j|i)
-        log_Pi = np.log(np.maximum(Pi_norm, 1e-12))
-        H = -np.sum(Pi_norm * log_Pi, axis=1)
-
-        H_diff = H - target_entropy
-
-        # Check convergence
-        converged = np.abs(H_diff) < tol
-        if converged.all():
-            break
-
-        # Update beta: if H > target, need larger beta (narrower Gaussian)
-        need_increase = H_diff > 0
-        need_decrease = ~need_increase & ~converged
-
-        # Increase beta
-        mask = need_increase & ~converged
-        beta_min[mask] = beta[mask]
-        finite = mask & np.isfinite(beta_max)
-        beta[finite] = (beta[finite] + beta_max[finite]) / 2.0
-        infinite = mask & ~np.isfinite(beta_max)
-        beta[infinite] = beta[infinite] * 2.0
-
-        # Decrease beta
-        mask = need_decrease
-        beta_max[mask] = beta[mask]
-        finite = mask & np.isfinite(beta_min)
-        beta[finite] = (beta[finite] + beta_min[finite]) / 2.0
-        infinite = mask & ~np.isfinite(beta_min)
-        beta[infinite] = beta[infinite] / 2.0
-
-    P = Pi_norm
-    return P
-
-
 class TSNE:
-    """t-SNE dimensionality reduction using MLX.
+    """t-SNE dimensionality reduction using MLX on Metal GPU.
 
-    Parameters
-    ----------
-    n_components : int, default=2
-        Dimension of the embedded space.
-    perplexity : float, default=30.0
-        Related to the number of nearest neighbors. Consider values between 5 and 50.
-    learning_rate : float or "auto", default=200.0
-        Learning rate for optimization.
-    n_iter : int, default=1000
-        Maximum number of gradient descent iterations.
-    early_exaggeration : float, default=12.0
-        Controls tightness of natural clusters in the embedding.
-    random_state : int or None, default=None
-        Random seed for reproducibility.
-    verbose : int, default=0
-        Verbosity level. 1 prints progress every 50 iterations.
+    Parameters:
+        n_components: Dimension of the embedded space (default 2).
+        perplexity: Related to the number of nearest neighbors (default 30.0).
+        learning_rate: Learning rate for gradient descent (default 200.0).
+        n_iter: Number of iterations (default 1000).
+        early_exaggeration: Factor by which P is multiplied in early iterations (default 12.0).
+        early_exaggeration_iter: Number of early exaggeration iterations (default 250).
+        momentum_init: Initial momentum (default 0.5).
+        momentum_final: Final momentum after early exaggeration (default 0.8).
+        random_state: Random seed for reproducibility.
+        verbose: Print progress every N iterations (0 = silent).
     """
 
     def __init__(
         self,
-        n_components=2,
-        perplexity=30.0,
-        learning_rate=200.0,
-        n_iter=1000,
-        early_exaggeration=12.0,
-        random_state=None,
-        verbose=0,
+        n_components: int = 2,
+        perplexity: float = 30.0,
+        learning_rate: float = 200.0,
+        n_iter: int = 1000,
+        early_exaggeration: float = 12.0,
+        early_exaggeration_iter: int = 250,
+        momentum_init: float = 0.5,
+        momentum_final: float = 0.8,
+        random_state: int | None = None,
+        verbose: int = 0,
     ):
         self.n_components = n_components
         self.perplexity = perplexity
         self.learning_rate = learning_rate
         self.n_iter = n_iter
         self.early_exaggeration = early_exaggeration
+        self.early_exaggeration_iter = early_exaggeration_iter
+        self.momentum_init = momentum_init
+        self.momentum_final = momentum_final
         self.random_state = random_state
         self.verbose = verbose
         self.embedding_ = None
-        self.kl_divergence_ = None
 
-    def fit_transform(self, X):
-        """Fit t-SNE and return embedded coordinates.
+    def fit_transform(self, X) -> np.ndarray:
+        """Fit t-SNE and return the embedding.
 
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-            Input data.
+        Args:
+            X: Input data, shape (n_samples, n_features). Can be np.ndarray or mx.array.
 
-        Returns
-        -------
-        Y : ndarray of shape (n_samples, n_components)
-            Embedding coordinates (numpy array).
+        Returns:
+            Embedding as np.ndarray, shape (n_samples, n_components).
         """
-        if isinstance(X, mx.array):
-            X_np = np.array(X)
-        elif isinstance(X, np.ndarray):
-            X_np = X.astype(np.float32)
-        else:
-            X_np = np.array(X, dtype=np.float32)
+        if isinstance(X, np.ndarray):
+            X = mx.array(X, dtype=mx.float32)
+        elif X.dtype != mx.float32:
+            X = X.astype(mx.float32)
 
-        n = X_np.shape[0]
+        n = X.shape[0]
 
-        # Step 1: Compute pairwise distances (use MLX for GPU acceleration)
-        X_mx = mx.array(X_np)
-        D_mx = _pairwise_distances(X_mx)
-        mx.eval(D_mx)
-        D_np = np.array(D_mx)
+        # Step 1: Compute pairwise distances
+        D = self._pairwise_distances(X)
+        mx.eval(D)
 
-        if self.verbose:
-            print("Computed pairwise distances")
+        # Step 2: Compute joint probabilities P
+        P = self._compute_joint_probabilities(D)
+        mx.eval(P)
 
-        # Step 2: Binary search for perplexity (vectorized numpy)
-        P_np = _binary_search_perplexity_vectorized(D_np, self.perplexity)
+        # Free distance matrix
+        del D
 
-        # Symmetrize: P = (P + P^T) / (2n)
-        P_np = (P_np + P_np.T) / (2.0 * n)
-        P_np = np.maximum(P_np, 1e-12)
-
-        if self.verbose:
-            print("Computed joint probabilities")
-
-        # Step 3: Gradient descent in MLX
-        P = mx.array(P_np.astype(np.float32))
-
-        # Initialize embedding
+        # Step 3: Initialize embedding
         if self.random_state is not None:
-            np.random.seed(self.random_state)
-        Y = mx.array(np.random.randn(n, self.n_components).astype(np.float32) * 1e-4)
+            mx.random.seed(self.random_state)
+        Y = mx.random.normal((n, self.n_components)) * 1e-4
+        mx.eval(Y)
+
+        # Step 4: Optimize with gradient descent
+        Y = self._optimize(P, Y)
+        mx.eval(Y)
+
+        self.embedding_ = np.array(Y)
+        return self.embedding_
+
+    def _pairwise_distances(self, X: mx.array) -> mx.array:
+        """Compute pairwise squared Euclidean distances. GPU-accelerated."""
+        # ||x - y||^2 = ||x||^2 + ||y||^2 - 2 x.y
+        sum_sq = mx.sum(X * X, axis=1)
+        D = sum_sq[:, None] + sum_sq[None, :] - 2.0 * (X @ X.T)
+        # Ensure non-negative (numerical precision)
+        D = mx.maximum(D, 0.0)
+        return D
+
+    def _compute_joint_probabilities(self, D: mx.array) -> mx.array:
+        """Compute symmetric joint probabilities from distances.
+
+        Uses binary search to find per-point sigma that achieves target perplexity.
+        """
+        n = D.shape[0]
+        target_entropy = mx.log(mx.array(self.perplexity))
+
+        # Binary search for sigma per point (done in numpy for control flow)
+        D_np = np.array(D)
+        P = np.zeros((n, n), dtype=np.float32)
+
+        for i in range(n):
+            lo, hi = 1e-20, 1e5
+            beta = 1.0  # 1 / (2 * sigma^2)
+
+            for _ in range(50):  # binary search iterations
+                # Compute conditional probabilities
+                dists = D_np[i].copy()
+                dists[i] = np.inf
+                p_i = np.exp(-dists * beta)
+                sum_p = max(p_i.sum(), 1e-20)
+                p_i /= sum_p
+
+                # Compute entropy
+                entropy = -np.sum(p_i * np.log(np.maximum(p_i, 1e-20)))
+                target = float(target_entropy.item())
+
+                if abs(entropy - target) < 1e-5:
+                    break
+
+                if entropy > target:
+                    lo = beta
+                    beta = (beta + hi) / 2.0 if hi < 1e4 else beta * 2.0
+                else:
+                    hi = beta
+                    beta = (beta + lo) / 2.0
+
+                P[i] = p_i
+
+            P[i] = p_i
+
+        # Symmetrize and normalize
+        P = (P + P.T) / (2.0 * n)
+        P = np.maximum(P, 1e-12)
+
+        return mx.array(P)
+
+    def _optimize(self, P: mx.array, Y: mx.array) -> mx.array:
+        """Gradient descent optimization of the KL divergence."""
+        n = Y.shape[0]
+        velocity = mx.zeros_like(Y)
+        gains = mx.ones_like(Y)
 
         # Early exaggeration
-        P_early = P * self.early_exaggeration
-        early_exag_end = 250
+        P_exag = P * self.early_exaggeration
 
-        # Momentum schedule
-        momentum_init = 0.5
-        momentum_final = 0.8
+        for iteration in range(self.n_iter):
+            # Use exaggerated P in early iterations
+            P_curr = P_exag if iteration < self.early_exaggeration_iter else P
 
-        velocity = mx.zeros_like(Y)
-        gains = mx.ones_like(Y)  # Adaptive learning rate
-        lr = float(self.learning_rate)
+            # Momentum schedule
+            momentum = self.momentum_init if iteration < self.early_exaggeration_iter else self.momentum_final
 
-        for it in range(self.n_iter):
-            P_cur = P_early if it < early_exag_end else P
-            mom = momentum_init if it < 20 else momentum_final
+            # Compute gradient
+            grad = self._compute_gradient(P_curr, Y)
 
-            # Compute Q (Student-t affinities in low-dim space)
-            D_low = _pairwise_distances(Y)
-            Q_num = 1.0 / (1.0 + D_low)
-            # Zero diagonal
-            Q_num = Q_num * (1.0 - mx.eye(n))
-            Q_sum = mx.sum(Q_num)
-            Q = mx.maximum(Q_num / Q_sum, 1e-12)
-
-            # Gradient: 4 * sum_j (p_ij - q_ij)(y_i - y_j)(1+||y_i-y_j||^2)^{-1}
-            PQ = P_cur - Q  # (n, n)
-            # Weighted by inverse distances
-            W = PQ * Q_num  # (n, n), element-wise
-
-            # grad_i = 4 * sum_j W_ij * (y_i - y_j)
-            # = 4 * (diag(sum_j W_ij) - W) @ Y
-            # = 4 * (sum_rows * Y - W @ Y)
-            W_rowsum = mx.sum(W, axis=1, keepdims=True)
-            grad = 4.0 * (W_rowsum * Y - W @ Y)
-
-            # Adaptive gains (like sklearn)
-            grad_sign = grad > 0
-            vel_sign = velocity > 0
+            # Adaptive gains (like in original t-SNE)
+            # gains increase when gradient and velocity have different signs
+            grad_sign = mx.sign(grad)
+            vel_sign = mx.sign(velocity)
             same_sign = (grad_sign == vel_sign)
             gains = mx.where(same_sign, gains * 0.8, gains + 0.2)
             gains = mx.maximum(gains, 0.01)
 
-            velocity = mom * velocity - lr * gains * grad
+            # Update velocity and position
+            velocity = momentum * velocity - self.learning_rate * gains * grad
             Y = Y + velocity
 
             # Center
-            Y = Y - mx.mean(Y, axis=0, keepdims=True)
+            Y = Y - mx.mean(Y, axis=0)
 
+            # Evaluate every iteration to keep graph small
             mx.eval(Y, velocity, gains)
 
-            if self.verbose and (it + 1) % 50 == 0:
-                kl = float(mx.sum(P_cur * mx.log(P_cur / Q)))
-                print(f"  Iteration {it + 1}: KL divergence = {kl:.4f}")
+            if self.verbose > 0 and (iteration + 1) % self.verbose == 0:
+                # Compute KL divergence for logging
+                Q = self._compute_q(Y)
+                mx.eval(Q)
+                kl = float(mx.sum(P_curr * mx.log(mx.maximum(P_curr, 1e-12) / mx.maximum(Q, 1e-12))).item())
+                print(f"Iteration {iteration + 1}: KL divergence = {kl:.4f}")
 
-        self.embedding_ = Y
-        self.kl_divergence_ = float(mx.sum(P * mx.log(P / Q)))
+        return Y
 
-        return np.array(Y)
+    def _compute_gradient(self, P: mx.array, Y: mx.array) -> mx.array:
+        """Compute t-SNE gradient using Student-t distribution.
 
-    def fit(self, X):
-        """Fit t-SNE model.
-
-        Parameters
-        ----------
-        X : array-like of shape (n_samples, n_features)
-
-        Returns
-        -------
-        self
+        Avoids materializing (n, n, d) tensor by computing gradient per-dimension.
         """
-        self.fit_transform(X)
-        return self
+        n = Y.shape[0]
+        d = Y.shape[1]
+
+        # Pairwise squared distances: ||y_i - y_j||^2
+        sum_sq = mx.sum(Y * Y, axis=1)
+        dist_sq = sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T)
+        dist_sq = mx.maximum(dist_sq, 0.0)
+
+        # Student-t kernel: 1 / (1 + ||y_i - y_j||^2)
+        inv_dist = 1.0 / (1.0 + dist_sq)
+
+        # Zero diagonal
+        mask = 1.0 - mx.eye(n)
+        inv_dist = inv_dist * mask
+
+        # Q distribution (normalized)
+        Q = inv_dist / mx.sum(inv_dist)
+        Q = mx.maximum(Q, 1e-12)
+
+        # Weights: (P - Q) * inv_dist, shape (n, n)
+        weights = (P - Q) * inv_dist
+
+        # Gradient per dimension: avoid (n, n, d) tensor
+        # grad_i = 4 * sum_j weights_ij * (y_i - y_j)
+        # = 4 * (sum_j weights_ij * y_i - sum_j weights_ij * y_j)
+        # = 4 * (diag(sum_j weights_ij) @ Y - weights @ Y)
+        row_sums = mx.sum(weights, axis=1, keepdims=True)  # (n, 1)
+        grad = 4.0 * (row_sums * Y - weights @ Y)  # (n, d)
+
+        return grad
+
+    def _compute_q(self, Y: mx.array) -> mx.array:
+        """Compute Q distribution for KL divergence logging."""
+        n = Y.shape[0]
+        sum_sq = mx.sum(Y * Y, axis=1)
+        dist_sq = sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T)
+        dist_sq = mx.maximum(dist_sq, 0.0)
+        inv_dist = 1.0 / (1.0 + dist_sq)
+        mask = 1.0 - mx.eye(n)
+        inv_dist = inv_dist * mask
+        Q = inv_dist / mx.sum(inv_dist)
+        return mx.maximum(Q, 1e-12)
