@@ -148,90 +148,62 @@ class TSNE:
         velocity = mx.zeros_like(Y)
         gains = mx.ones_like(Y)
 
-        # Early exaggeration
+        # Pre-compute constants (avoid recreating each iteration)
+        eye_mask = 1.0 - mx.eye(n)
         P_exag = P * self.early_exaggeration
 
         for iteration in range(self.n_iter):
-            # Use exaggerated P in early iterations
             P_curr = P_exag if iteration < self.early_exaggeration_iter else P
-
-            # Momentum schedule
             momentum = self.momentum_init if iteration < self.early_exaggeration_iter else self.momentum_final
 
-            # Compute gradient
-            grad = self._compute_gradient(P_curr, Y)
+            # Compute gradient with cached eye mask
+            grad = self._compute_gradient(P_curr, Y, eye_mask)
 
-            # Adaptive gains (like in original t-SNE)
-            # gains increase when gradient and velocity have different signs
-            grad_sign = mx.sign(grad)
-            vel_sign = mx.sign(velocity)
-            same_sign = (grad_sign == vel_sign)
+            # Adaptive gains
+            same_sign = (mx.sign(grad) == mx.sign(velocity))
             gains = mx.where(same_sign, gains * 0.8, gains + 0.2)
             gains = mx.maximum(gains, 0.01)
 
-            # Update velocity and position
+            # Update
             velocity = momentum * velocity - self.learning_rate * gains * grad
             Y = Y + velocity
-
-            # Center
             Y = Y - mx.mean(Y, axis=0)
 
-            # Evaluate every iteration to keep graph small
+            # Eval once per iteration to keep graph small
             mx.eval(Y, velocity, gains)
 
             if self.verbose > 0 and (iteration + 1) % self.verbose == 0:
-                # Compute KL divergence for logging
-                Q = self._compute_q(Y)
+                Q = self._compute_q(Y, eye_mask)
                 mx.eval(Q)
                 kl = float(mx.sum(P_curr * mx.log(mx.maximum(P_curr, 1e-12) / mx.maximum(Q, 1e-12))).item())
                 print(f"Iteration {iteration + 1}: KL divergence = {kl:.4f}")
 
         return Y
 
-    def _compute_gradient(self, P: mx.array, Y: mx.array) -> mx.array:
+    def _compute_gradient(self, P: mx.array, Y: mx.array, eye_mask: mx.array) -> mx.array:
         """Compute t-SNE gradient using Student-t distribution.
 
         Avoids materializing (n, n, d) tensor by computing gradient per-dimension.
+        Uses Python scalars (4.0, 1e-12) to avoid dtype upcasting.
         """
-        n = Y.shape[0]
-        d = Y.shape[1]
-
-        # Pairwise squared distances: ||y_i - y_j||^2
+        # Pairwise squared distances
         sum_sq = mx.sum(Y * Y, axis=1)
-        dist_sq = sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T)
-        dist_sq = mx.maximum(dist_sq, 0.0)
+        dist_sq = mx.maximum(sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T), 0.0)
 
-        # Student-t kernel: 1 / (1 + ||y_i - y_j||^2)
-        inv_dist = 1.0 / (1.0 + dist_sq)
+        # Student-t kernel with pre-computed mask
+        inv_dist = eye_mask / (1.0 + dist_sq)
 
-        # Zero diagonal
-        mask = 1.0 - mx.eye(n)
-        inv_dist = inv_dist * mask
+        # Q distribution
+        Q = mx.maximum(inv_dist / mx.sum(inv_dist), 1e-12)
 
-        # Q distribution (normalized)
-        Q = inv_dist / mx.sum(inv_dist)
-        Q = mx.maximum(Q, 1e-12)
-
-        # Weights: (P - Q) * inv_dist, shape (n, n)
+        # Gradient: 4 * (diag(row_sums) @ Y - weights @ Y)
         weights = (P - Q) * inv_dist
+        row_sums = mx.sum(weights, axis=1, keepdims=True)
+        return 4.0 * (row_sums * Y - weights @ Y)
 
-        # Gradient per dimension: avoid (n, n, d) tensor
-        # grad_i = 4 * sum_j weights_ij * (y_i - y_j)
-        # = 4 * (sum_j weights_ij * y_i - sum_j weights_ij * y_j)
-        # = 4 * (diag(sum_j weights_ij) @ Y - weights @ Y)
-        row_sums = mx.sum(weights, axis=1, keepdims=True)  # (n, 1)
-        grad = 4.0 * (row_sums * Y - weights @ Y)  # (n, d)
-
-        return grad
-
-    def _compute_q(self, Y: mx.array) -> mx.array:
+    def _compute_q(self, Y: mx.array, eye_mask: mx.array) -> mx.array:
         """Compute Q distribution for KL divergence logging."""
-        n = Y.shape[0]
         sum_sq = mx.sum(Y * Y, axis=1)
-        dist_sq = sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T)
-        dist_sq = mx.maximum(dist_sq, 0.0)
-        inv_dist = 1.0 / (1.0 + dist_sq)
-        mask = 1.0 - mx.eye(n)
-        inv_dist = inv_dist * mask
-        Q = inv_dist / mx.sum(inv_dist)
-        return mx.maximum(Q, 1e-12)
+        dist_sq = mx.maximum(sum_sq[:, None] + sum_sq[None, :] - 2.0 * (Y @ Y.T), 0.0)
+        inv_dist = eye_mask / (1.0 + dist_sq)
+        return mx.maximum(inv_dist / mx.sum(inv_dist), 1e-12)
