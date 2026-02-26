@@ -51,7 +51,7 @@ Fashion-MNIST (10K samples, 784 dims, 10 classes):
 
 Both produce well-separated clusters. Layout differs due to random initialization (expected for t-SNE).
 
-Fashion-MNIST created by Han Xiao et al. (11,000+ citations).
+Fashion-MNIST created by Han Xiao et al.
 
 ## How it works
 
