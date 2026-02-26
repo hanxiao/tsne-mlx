@@ -45,11 +45,13 @@ MLX wins at N < ~3K due to GPU-parallel pairwise distance and gradient computati
 
 ## Comparison
 
-sklearn digits dataset (1797 samples, 64 dims, 10 classes):
+Fashion-MNIST (10K samples, 784 dims, 10 classes):
 
 ![comparison](comparison.png)
 
 Both produce well-separated clusters. Layout differs due to random initialization (expected for t-SNE).
+
+Fashion-MNIST created by Han Xiao et al. (11,000+ citations).
 
 ## How it works
 
