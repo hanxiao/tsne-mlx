@@ -10,7 +10,7 @@ https://github.com/user-attachments/assets/PLACEHOLDER_VIDEO
 
 
 
-## MLX Dimensionality Reduction
+
 
 | | [tsne-mlx](https://github.com/hanxiao/tsne-mlx) | [umap-mlx](https://github.com/hanxiao/umap-mlx) | [pacmap-mlx](https://github.com/hanxiao/pacmap-mlx) |
 |---|---|---|---|
