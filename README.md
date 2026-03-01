@@ -54,7 +54,7 @@ FFT-accelerated interpolation (FIt-SNE algorithm) for O(n) repulsive computation
 
 ## Comparison
 
-Fashion-MNIST 10K (784 dims, 10 classes, 1000 iterations):
+Fashion-MNIST 70K (784 dims, 10 classes, 750 iterations):
 
 ![comparison](comparison.png?raw=true)
 
