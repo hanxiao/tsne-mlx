@@ -6,7 +6,8 @@ t-SNE in pure MLX for Apple Silicon. Entire pipeline runs on Metal GPU.
 
 
 
-https://github.com/user-attachments/assets/PLACEHOLDER_VIDEO
+https://github.com/user-attachments/assets/2c0228f8-7326-4601-a368-eaa0163c3739
+
 
 
 
