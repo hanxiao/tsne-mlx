@@ -4,3 +4,13 @@ __pycache__/
 dist/
 build/
 *.pyc
+uv.lock
+
+# debug/intermediate outputs
+comparison_*.png
+tsne_70k_*.png
+iter_sweep.png
+benchmark.py
+quick_bench.py
+quick_test.py
+verify.py
