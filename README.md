@@ -57,9 +57,9 @@ Parameters:
 ## Performance (M3 Ultra, Fashion-MNIST)
 
 ```
-N        sklearn     tsne-mlx    speedup
-10000    10.3s       6.2s        1.7x
-70000    60.7s       4.9s        12x
+N        iters    sklearn     tsne-mlx    speedup
+10000    1000     10.3s       6.2s        1.7x
+70000    750      60.7s       4.9s        12x
 ```
 
 For N < 16K, uses `mx.compile`-d exact repulsive forces via matmul on GPU.
