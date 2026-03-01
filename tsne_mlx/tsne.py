@@ -133,7 +133,17 @@ class TSNE:
         # KNN
         k = min(int(3 * self.perplexity), n - 1)
         X_mx = mx.array(X_for_knn)
-        knn_indices, knn_dists = _chunked_knn(X_mx, k)
+
+        # NNDescent for very large datasets (brute-force is O(n^2));
+        # below 100K, brute-force on GPU is fast enough
+        if n >= 100000:
+            from nndescent_mlx import NNDescent
+            nn = NNDescent(k=k, random_state=self.random_state)
+            knn_idx_np, knn_dist_np = nn.build(X_mx)
+            knn_indices = mx.array(knn_idx_np)
+            knn_dists = mx.array(knn_dist_np)
+        else:
+            knn_indices, knn_dists = _chunked_knn(X_mx, k)
         mx.eval(knn_indices, knn_dists)
 
         # Build P matrix
