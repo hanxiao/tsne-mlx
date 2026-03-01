@@ -2,7 +2,7 @@
 
 t-SNE in pure MLX for Apple Silicon. Entire pipeline runs on Metal GPU.
 
-5-12x faster than sklearn. Fashion-MNIST 70K in 4.9 seconds.
+12x faster than sklearn on 70K points. Uses FFT-accelerated interpolation ([FIt-SNE](https://github.com/KlugerLab/FIt-SNE)) for O(n) repulsive force computation at scale.
 
 
 
@@ -49,8 +49,12 @@ N        sklearn     tsne-mlx    speedup
 70000    60.7s       4.9s        12x
 ```
 
-Small N uses compiled exact repulsive forces on GPU. Large N (>16K) switches to
-FFT-accelerated interpolation (FIt-SNE algorithm) for O(n) repulsive computation.
+For N < 16K, uses `mx.compile`-d exact repulsive forces via matmul on GPU.
+For N >= 16K, switches to FFT-accelerated interpolation (FIt-SNE): Lagrange
+polynomial scatter onto a regular grid, batched 2D FFT convolution with the
+Cauchy kernel (circulant embedding), and interpolation back. This reduces
+repulsive force computation from O(n^2) to O(n) per iteration, bringing
+each epoch down to ~2ms on GPU for 70K points.
 
 ## Comparison
 
@@ -67,8 +71,15 @@ Fashion-MNIST 70K (784 dims, 10 classes, 750 iterations):
 5. Gradient descent with momentum (0.5/0.8) and adaptive gains:
    - Attractive: sparse KNN edges weighted by joint probability
    - Repulsive (N < 16K): compiled exact all-pairs via matmul trick on GPU
-   - Repulsive (N >= 16K): FFT interpolation -- Lagrange scatter to grid, batched FFT convolution with Cauchy kernel, gather back
+   - Repulsive (N >= 16K): FFT interpolation (FIt-SNE) on GPU
 6. PCA initialization (first 2 components, scaled to 1e-4)
+
+The FFT approach follows [Linderman et al. (2019)](https://www.nature.com/articles/s41592-018-0308-4).
+Instead of computing all O(n^2) pairwise repulsive interactions, points are
+interpolated onto a uniform grid using Lagrange polynomials (3 nodes per cell),
+the kernel convolution is performed via FFT in O(M log M) where M is the grid
+size (typically ~150-300), and results are interpolated back. The entire
+scatter-FFT-gather pipeline runs on Metal GPU using `mx.fft.rfft2`.
 
 Dependencies: `mlx` and `numpy` only. No scipy, no PyTorch.
 
