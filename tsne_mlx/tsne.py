@@ -134,8 +134,7 @@ class TSNE:
         k = min(int(3 * self.perplexity), n - 1)
         X_mx = mx.array(X_for_knn)
 
-        # NNDescent for very large datasets (brute-force is O(n^2));
-        # below 100K, brute-force on GPU is fast enough
+        # NNDescent for datasets where brute-force O(n^2) exceeds GPU memory
         if n >= 100000:
             from nndescent_mlx import NNDescent
             nn = NNDescent(k=k, random_state=self.random_state)
