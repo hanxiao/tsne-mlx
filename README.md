@@ -1,5 +1,9 @@
 # tsne-mlx
 
+> [!WARNING]
+> This repo has been merged into [mlx-vis](https://github.com/hanxiao/mlx-vis) and is no longer maintained separately. Please use `pip install mlx-vis` instead.
+
+
 t-SNE in pure MLX for Apple Silicon. Entire pipeline runs on Metal GPU.
 
 12x faster than sklearn on 70K points. Uses FFT-accelerated interpolation ([FIt-SNE](https://github.com/KlugerLab/FIt-SNE)) for O(n) repulsive force computation at scale.
